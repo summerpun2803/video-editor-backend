@@ -1,7 +1,6 @@
 version: '3.3'
 
 services:
-  # PostgreSQL (you already have this running)
   db:
     image: postgres:15-alpine
     container_name: video-postgres
@@ -13,18 +12,17 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d videodb"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # FastAPI Backend (NEW!)
   backend:
     build: .
     container_name: video-backend
-    restart: always
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -32,7 +30,7 @@ services:
     depends_on:
       - db
     volumes:
-      - ./uploads:/app/uploads  # persist uploads outside container
+      - ./uploads:/app/uploads
 
 volumes:
   postgres_data:
