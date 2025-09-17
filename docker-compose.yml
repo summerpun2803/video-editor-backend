@@ -1,36 +1,63 @@
-version: '3.3'
+  version: '3.3'
 
-services:
-  db:
-    image: postgres:15-alpine
-    container_name: video-postgres
-    restart: always
-    environment:
-      POSTGRES_DB: videodb
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: secret123
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d videodb"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+  services:
+    db:
+      image: postgres:15-alpine
+      container_name: video-postgres
+      restart: always
+      environment:
+        POSTGRES_DB: videodb
+        POSTGRES_USER: admin
+        POSTGRES_PASSWORD: secret123
+      ports:
+        - "5432:5432"
+      volumes:
+        - postgres_data:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U admin -d videodb"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
 
-  backend:
-    build: .
-    container_name: video-backend
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql://admin:secret123@db:5432/videodb
-    depends_on:
-      - db
-    volumes:
-      - ./uploads:/app/uploads
+    backend:
+      build: .
+      container_name: video-backend
+      restart: unless-stopped
+      ports:
+        - "8000:8000"
+      environment:
+        - DATABASE_URL=postgresql://admin:secret123@db:5432/videodb
+        - REDIS_URL=redis://redis:6379/0 
+      depends_on:
+        - db
+      volumes:
+        - ./uploads:/app/uploads
+    
+    redis:
+      image: redis:7-alpine
+      container_name: video-redis
+      restart: always
+      # ports:
+      #   - "6379:6379"
+      # healthcheck:
+      #   test: ["CMD", "redis-cli", "ping"]
+      #   interval: 5s
+      #   timeout: 3s
+      #   retries: 3
 
-volumes:
-  postgres_data:
+    worker:
+      build: .
+      container_name: video-worker
+      restart: unless-stopped
+      command: celery -A app.celery_app worker --loglevel=info --pool=solo -I app.tasks
+      environment:
+        - DATABASE_URL=postgresql://admin:secret123@db:5432/videodb
+        - REDIS_URL=redis://redis:6379/0
+      depends_on:
+        - db
+        - redis
+      volumes:
+        - ./uploads:/app/uploads
+
+  volumes:
+    postgres_data:

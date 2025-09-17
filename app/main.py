@@ -13,6 +13,9 @@ import subprocess
 from .database import Base, engine, get_db
 from . import models
 
+from .celery_app import celery_app
+from .tasks import trim_video_task
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -147,59 +150,28 @@ async def trim_video(video_id: int, start_time: float, end_time:float ,db: Sessi
     db.add(job)
     db.commit()
 
-    try:
-        duration = end_time - start_time
-        
-        # Build FFmpeg command
-        cmd = [
-            'ffmpeg',
-            '-i', input_path,
-            '-ss', str(start_time),
-            '-t', str(duration),
-            '-c:v', 'libx264',
-            '-c:a', 'aac',
-            '-strict', 'experimental',
-            output_path
-        ]
-        
-        # Run command
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise Exception(f"FFmpeg failed: {result.stderr}")
+    celery_app.send_task(
+        "app.tasks.trim_video_task",
+        args=[job_id, input_path, output_path, start_time, end_time - start_time],
+        task_id=job_id
+    )
 
-        # Verify output exists
-        if not os.path.exists(output_path):
-            raise Exception("Output file not created")
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "Video trimming started in background"
+    }
 
-        # 6. Save new video to DB
-        probe = ffmpeg.probe(output_path)
-        format_info = probe.get('format', {})
-        new_duration = float(format_info.get('duration', 0.0))
-        new_size = int(format_info.get('size', 0))
+@app.get("/job/{job_id}")
+async def get_job_status(job_id: str, db: Session= Depends(get_db)):
 
-        new_video = models.Video(
-            filename=output_filename,
-            original_filename=f"Trimmed from {video.original_filename}",
-            duration=new_duration,
-            size=new_size
-        )
-        db.add(new_video)
-        db.commit()
+    job = db.query(models.Job).filter(models.Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="JOB not found")
+    
 
-        job.status = "completed"
-        job.result_filename = output_filename
-        db.commit()
-
-        return {
-            "job_id": job_id,
-            "status": "completed",
-            "video_id": new_video.id,
-            "filename": output_filename,
-            "download_url": f"/download/{output_filename}"
-        }
-
-    except Exception as e:
-        job.status = "failed"
-        db.commit()
-        logger.error(f"Trim failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Trim failed: {str(e)}")
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "video_id": job.video_id
+    }
