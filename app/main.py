@@ -2,11 +2,13 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
+from fastapi.responses import FileResponse
 import time
 import logging
 import os
 import uuid
 import ffmpeg
+import subprocess
 
 from .database import Base, engine, get_db
 from . import models
@@ -97,7 +99,7 @@ async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_d
     try:
         db_video = models.Video(
             filename=safe_filename,
-            original_filename=file.filename,  # ← Now safe!
+            original_filename=file.filename,
             duration=duration,
             size=size
         )
@@ -119,3 +121,85 @@ async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_d
         "size": db_video.size,
         "upload_time": db_video.upload_time
     }
+
+@app.post("/trim")
+async def trim_video(video_id: int, start_time: float, end_time:float ,db: Session= Depends(get_db)):
+
+    video = db.query(models.Video).filter(models.Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    input_path = os.path.join(UPLOAD_DIR, video.filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="Source file not found")
+    
+    name, ext = os.path.splitext(video.filename)
+    job_id = str(uuid.uuid4())
+    output_filename = f"{name}_trimmed_{job_id[:8]}{ext}"
+    output_path = os.path.join(UPLOAD_DIR, output_filename)
+
+    job = models.Job(
+        id=job_id,
+        video_id=video_id,
+        status="pending"
+    )
+
+    db.add(job)
+    db.commit()
+
+    try:
+        duration = end_time - start_time
+        
+        # Build FFmpeg command
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-ss', str(start_time),
+            '-t', str(duration),
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            '-strict', 'experimental',
+            output_path
+        ]
+        
+        # Run command
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg failed: {result.stderr}")
+
+        # Verify output exists
+        if not os.path.exists(output_path):
+            raise Exception("Output file not created")
+
+        # 6. Save new video to DB
+        probe = ffmpeg.probe(output_path)
+        format_info = probe.get('format', {})
+        new_duration = float(format_info.get('duration', 0.0))
+        new_size = int(format_info.get('size', 0))
+
+        new_video = models.Video(
+            filename=output_filename,
+            original_filename=f"Trimmed from {video.original_filename}",
+            duration=new_duration,
+            size=new_size
+        )
+        db.add(new_video)
+        db.commit()
+
+        job.status = "completed"
+        job.result_filename = output_filename
+        db.commit()
+
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "video_id": new_video.id,
+            "filename": output_filename,
+            "download_url": f"/download/{output_filename}"
+        }
+
+    except Exception as e:
+        job.status = "failed"
+        db.commit()
+        logger.error(f"Trim failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Trim failed: {str(e)}")
