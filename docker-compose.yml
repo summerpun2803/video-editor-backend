@@ -1,0 +1,38 @@
+version: '3.3'
+
+services:
+  # PostgreSQL (you already have this running)
+  db:
+    image: postgres:15-alpine
+    container_name: video-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: videodb
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d videodb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend (NEW!)
+  backend:
+    build: .
+    container_name: video-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://admin:secret123@db:5432/videodb
+    depends_on:
+      - db
+    volumes:
+      - ./uploads:/app/uploads  # persist uploads outside container
+
+volumes:
+  postgres_data:
