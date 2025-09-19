@@ -6,8 +6,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 redis_url = os.getenv('REDIS_URL')
-if not redis_url:
-    raise RuntimeError("REDIS_URL not set")
 
 celery_app = Celery(
     'video_tasks',

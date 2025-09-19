@@ -40,26 +40,23 @@ async def startup_event():
     
     for attempt in range(max_retries):
         try:
-            logger.info(f"🔁 Attempt {attempt + 1}: Connecting to database...")
+            logger.info(f"Attempt {attempt + 1}: Connecting to database...")
             with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-                logger.info("✅ Database connected!")
+                logger.info("Database connected!")
                 
                 # Create tables
-                logger.info("🔨 Creating tables if not exist...")
+                logger.info("Creating tables if not exist...")
                 models.Base.metadata.create_all(bind=engine)
-                logger.info("✅ Tables created!")
+                logger.info("Tables created!")
                 return
                 
         except OperationalError as e:
-            logger.warning(f"⚠️ Database not ready (attempt {attempt + 1}/{max_retries}): {e}")
+            logger.warning(f"Database not ready: {e}")
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
             else:
-                logger.error("❌ Failed to connect to database after all retries")
-                # Don't crash the app — let it start, but DB operations will fail
-                # This way, /health still works, and you can debug
-
+                logger.error("Failed to connect to database after all retries")
+             
 @app.get("/")
 def read_root():
     return {"message": "Video Editor Backend is running!"}
@@ -102,7 +99,6 @@ async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_d
     try:
         db_video = models.Video(
             filename=safe_filename,
-            original_filename=file.filename,
             duration=duration,
             size=size
         )
@@ -119,14 +115,13 @@ async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_d
     return {
         "id": db_video.id,
         "filename": db_video.filename,
-        "original_filename": db_video.original_filename,
         "duration": db_video.duration,
         "size": db_video.size,
         "upload_time": db_video.upload_time
     }
 
 @app.post("/trim")
-async def trim_video(video_id: int, start_time: float, end_time:float ,db: Session= Depends(get_db)):
+async def trim_video(video_id: int, start_time: float, end_time:float ,db: Session=Depends(get_db)):
 
     video = db.query(models.Video).filter(models.Video.id == video_id).first()
     if not video:
@@ -143,8 +138,9 @@ async def trim_video(video_id: int, start_time: float, end_time:float ,db: Sessi
 
     job = models.Job(
         id=job_id,
-        video_id=video_id,
-        status="pending"
+        original_video_id=video_id,
+        status="pending",
+        type="trim"
     )
 
     db.add(job)
@@ -159,10 +155,11 @@ async def trim_video(video_id: int, start_time: float, end_time:float ,db: Sessi
     return {
         "job_id": job_id,
         "status": "pending",
-        "message": "Video trimming started in background"
+        "message": "Video trimming started in background",
+        "type": job.type
     }
 
-@app.get("/job/{job_id}")
+@app.get("/status/{job_id}")
 async def get_job_status(job_id: str, db: Session= Depends(get_db)):
 
     job = db.query(models.Job).filter(models.Job.id == job_id).first()
@@ -170,8 +167,76 @@ async def get_job_status(job_id: str, db: Session= Depends(get_db)):
         raise HTTPException(status_code=404, detail="JOB not found")
     
 
-    return {
+    response = {
         "job_id": job.id,
         "status": job.status,
-        "video_id": job.video_id
+        "original_video_id": job.original_video_id,
+        "type": job.type
+    }
+    
+    if job.status == "completed":
+        response["updated_video_id"] = job.updated_video_id
+        response["result_filename"] = job.result_filename
+        
+    return response
+
+@app.post("/overlay/text")
+async def add_text_overlay(
+    video_id: int,
+    text: str,
+    x: int = 10,
+    y: int = 10,
+    font_size: int = 24,
+    font_color: str = "white",
+    start_time: float = 0.0,
+    end_time: float = 0.0,
+    db: Session = Depends(get_db)
+):
+    video = db.query(models.Video).filter(models.Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    input_path = os.path.join(UPLOAD_DIR, video.filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="Source file not found")
+    
+    name, ext = os.path.splitext(video.filename)
+    job_id = str(uuid.uuid4())
+    output_filename = f"{name}_text_{job_id[:8]}{ext}"
+    output_path = os.path.join(UPLOAD_DIR, output_filename)
+
+    overlay = models.Overlay(
+        video_id=video_id,
+        overlay_type="text",
+        content=text,
+        position_x=x,
+        position_y=y,
+        start_time=start_time,
+        end_time=end_time,
+        font_size=font_size,
+        font_color=font_color,
+    )
+    db.add(overlay)
+    db.commit()
+
+    job = models.Job(
+        id=job_id,
+        original_video_id=video_id,
+        status="pending",
+        type="TextOverlay"
+    )
+    db.add(job)
+    db.commit()
+
+    celery_app.send_task(
+        "app.tasks.add_text_overlay_task",
+        args=[job_id, input_path, output_path, overlay.id],
+        task_id=job_id
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "Text overlay processing started",
+        "type": job.type
     }
