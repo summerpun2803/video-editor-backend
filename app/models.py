@@ -38,4 +38,7 @@ class Overlay(Base):
     font_size = Column(Integer, nullable=True)
     font_color = Column(String, nullable=True)
     opacity = Column(Float, default=1.0)
+
+    scale_width = Column(Integer, nullable=True) 
+    scale_height = Column(Integer, nullable=True)  
     

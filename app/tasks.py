@@ -13,6 +13,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger().handlers[0].flush = lambda: None 
 
 def get_db():
     db = SessionLocal()
@@ -146,7 +147,7 @@ def add_text_overlay_task(self, job_id: str, input_path: str, output_path: str, 
 
         new_video = models.Video(
             filename=os.path.basename(output_path),
-            original_video_id=f"{job.original_video_id}",
+            original_video_id=job.original_video_id,
             duration=new_duration,
             size=new_size
         )
@@ -172,5 +173,177 @@ def add_text_overlay_task(self, job_id: str, input_path: str, output_path: str, 
             job.result_filename = None
             db.commit()
         raise Exception(f"Text overlay failed: {str(e)}")
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.tasks.add_image_overlay_task")
+def add_image_overlay_task(self, job_id: str, input_path: str, output_path: str, img_path: str,
+                            x: int, y: int, width: int, height: int,
+                            start_time: float, end_time: float, opacity: float):
+    """Add image overlay to video"""
+    db = next(get_db())
+    
+    try:
+        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        if not job:
+            raise Exception(f"Job {job_id} not found")
+
+        job.status = "processing"
+        db.commit()
+
+        # Build FFmpeg filter
+        # Scale image
+        scale_filter = f"[1:v]scale={width}:{height}[overlay_scaled]"
+        
+        # Position and timing
+        overlay_filter = f"[0:v][overlay_scaled]overlay=x={x}:y={y}"
+        
+        # Add opacity
+        # if opacity < 1.0:
+        #     overlay_filter += f",format=rgba,colorchannelmixer=aa={opacity}"
+        
+        # Add timing
+        if end_time > 0:
+            overlay_filter += f":enable='between(t,{start_time},{end_time})'"
+        
+        filter_complex = f"{scale_filter};{overlay_filter}"
+
+        # Run FFmpeg
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-i', img_path,
+            '-filter_complex', filter_complex,
+            '-c:a', 'copy',
+            output_path
+        ]
+        logger.info(f"filter command {filter_complex}")
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+        if not os.path.exists(output_path):
+            raise Exception("Output file not created")
+
+
+        probe = ffmpeg.probe(output_path)
+        format_info = probe.get('format', {})
+        new_duration = float(format_info.get('duration', 0.0))
+        new_size = int(format_info.get('size', 0))
+
+        # Save new video
+        new_video = models.Video(
+            filename=os.path.basename(output_path),
+            original_video_id=job.original_video_id,
+            duration=new_duration,
+            size=new_size
+        )
+        db.add(new_video)
+        db.commit()
+
+        # Update job
+        job.status = "completed"
+        job.result_filename = os.path.basename(output_path)
+        job.updated_video_id = new_video.id
+        db.commit()
+
+        return {
+            "status": "completed",
+            "job_id": job_id,
+            "video_id": new_video.id,
+            "filename": job.result_filename
+        }
+
+    except Exception as e:
+        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        if job:
+            job.status = "failed"
+            job.result_filename = None
+            db.commit()
+        raise Exception(f"Image overlay failed: {str(e)}")
+    finally:
+        db.close()
+
+@celery_app.task(bind=True, name="app.tasks.add_video_overlay_task")
+def add_video_overlay_task(self, job_id: str, input_path: str, output_path: str, overlay_path: str,
+                          x: int, y: int, width: int, height: int,
+                          start_time: float, end_time: float, opacity: float):
+    """Add video overlay to video"""
+    db = next(get_db())
+    
+    try:
+        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        if not job:
+            raise Exception(f"Job {job_id} not found")
+
+        job.status = "processing"
+        db.commit()
+
+        # Build FFmpeg filter
+        # Scale overlay video
+        scale_filter = f"[1:v]scale={width}:{height}[overlay_scaled]"
+        
+        # Position and timing
+        overlay_filter = f"[0:v][overlay_scaled]overlay=x={x}:y={y}"
+        
+        # Add opacity
+        # if opacity < 1.0:
+        #     overlay_filter += f",format=rgba,colorchannelmixer=aa={opacity}"
+        
+        # Add timing
+        if end_time > 0:
+            overlay_filter += f":enable='between(t,{start_time},{end_time})'"
+        
+        filter_complex = f"{scale_filter};{overlay_filter}"
+        logger.info(f"filter command {filter_complex}")
+        # Run FFmpeg
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-i', overlay_path,
+            '-filter_complex', filter_complex,
+            '-c:a', 'copy',
+            output_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        logger.info(f"FFmpeg filter_complex: {filter_complex}")
+
+        if not os.path.exists(output_path):
+            raise Exception("Output file not created")
+
+        probe = ffmpeg.probe(output_path)
+        format_info = probe.get('format', {})
+        new_duration = float(format_info.get('duration', 0.0))
+        new_size = int(format_info.get('size', 0))
+
+        # Save new video
+        new_video = models.Video(
+            filename=os.path.basename(output_path),
+            original_video_id=job.original_video_id,
+            duration=new_duration,
+            size=new_size
+        )
+        db.add(new_video)
+        db.commit()
+
+        # Update job
+        job.status = "completed"
+        job.result_filename = os.path.basename(output_path)
+        job.updated_video_id = new_video.id
+        db.commit()
+
+        return {
+            "status": "completed",
+            "job_id": job_id,
+            "video_id": new_video.id,
+            "filename": job.result_filename
+        }
+
+    except Exception as e:
+        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        if job:
+            job.status = "failed"
+            job.result_filename = None
+            db.commit()
+        raise Exception(f"Video overlay failed: {str(e)}")
     finally:
         db.close()

@@ -53,6 +53,7 @@
       environment:
         - DATABASE_URL=postgresql://admin:secret123@db:5432/videodb
         - REDIS_URL=redis://redis:6379/0
+        - PYTHONUNBUFFERED=1 
       depends_on:
         - db
         - redis

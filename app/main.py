@@ -240,3 +240,162 @@ async def add_text_overlay(
         "message": "Text overlay processing started",
         "type": job.type
     }
+
+@app.post("/overlay/image")
+async def add_image_overlay(
+    video_id: int,
+    image_file: UploadFile = File(...),
+    x: int = 10,
+    y: int = 10,
+    width: int = 100,
+    height: int = 100,
+    start_time: float = 0.0,
+    end_time: float = 0.0,
+    opacity: float = 1.0,
+    db: Session = Depends(get_db)
+):
+    # Validate video
+    video = db.query(models.Video).filter(models.Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    input_path = os.path.join(UPLOAD_DIR, video.filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="Source file not found")
+
+    # Validate and save image
+    if not image_file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+        raise HTTPException(status_code=400, detail="Only PNG/JPG images allowed")
+
+    img_extension = image_file.filename.split('.')[-1]
+    img_filename = f"overlay_img_{uuid.uuid4().hex}.{img_extension}"
+    img_path = os.path.join(UPLOAD_DIR, img_filename)
+
+    with open(img_path, "wb") as f:
+        content = await image_file.read()
+        f.write(content)
+
+    # Generate output filename
+    name, ext = os.path.splitext(video.filename)
+    job_id = str(uuid.uuid4())
+    output_filename = f"{name}_img_overlay_{job_id[:8]}{ext}"
+    output_path = os.path.join(UPLOAD_DIR, output_filename)
+
+    # Save overlay config
+    overlay = models.Overlay(
+        video_id=video_id,
+        overlay_type="image",
+        content=image_file.filename,
+        position_x=x,
+        position_y=y,
+        start_time=start_time,
+        end_time=end_time,
+        opacity=opacity,
+        scale_width=width,
+        scale_height=height
+    )
+    db.add(overlay)
+    db.commit()
+
+    # Create job
+    job = models.Job(
+        id=job_id,
+        original_video_id=video_id,
+        status="pending",
+        type="ImageOverlay"
+    )
+    db.add(job)
+    db.commit()
+
+    # Send to Celery
+    celery_app.send_task(
+        "app.tasks.add_image_overlay_task",
+        args=[job_id, input_path, output_path, img_path, x, y, width, height, start_time, end_time, opacity],
+        task_id=job_id
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "Image overlay processing started",
+    }
+
+
+@app.post("/overlay/video")
+async def add_video_overlay(
+    video_id: int,
+    overlay_video: UploadFile = File(...),
+    x: int = 10,
+    y: int = 10,
+    width: int = 320,
+    height: int = 240,
+    start_time: float = 0.0,
+    end_time: float = 0.0,
+    opacity: float = 1.0,
+    db: Session = Depends(get_db)
+):
+    # Validate main video
+    video = db.query(models.Video).filter(models.Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Main video not found")
+
+    input_path = os.path.join(UPLOAD_DIR, video.filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="Source file not found")
+
+    # Validate and save overlay video
+    if not overlay_video.filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
+        raise HTTPException(status_code=400, detail="Only MP4/MOV/AVI/MKV videos allowed")
+
+    overlay_extension = overlay_video.filename.split('.')[-1]
+    overlay_filename = f"overlay_vid_{uuid.uuid4().hex}.{overlay_extension}"
+    overlay_path = os.path.join(UPLOAD_DIR, overlay_filename)
+
+    with open(overlay_path, "wb") as f:
+        content = await overlay_video.read()
+        f.write(content)
+
+    # Generate output filename
+    name, ext = os.path.splitext(video.filename)
+    job_id = str(uuid.uuid4())
+    output_filename = f"{name}_vid_overlay_{job_id[:8]}{ext}"
+    output_path = os.path.join(UPLOAD_DIR, output_filename)
+
+    # Save overlay config
+    overlay = models.Overlay(
+        video_id=video_id,
+        overlay_type="video",
+        content=overlay_video.filename,
+        position_x=x,
+        position_y=y,
+        start_time=start_time,
+        end_time=end_time,
+        opacity=opacity,
+        scale_width=width,
+        scale_height=height
+    )
+    db.add(overlay)
+    db.commit()
+
+    # Create job
+    job = models.Job(
+        id=job_id,
+        original_video_id=video_id,
+        status="pending",
+        type="VideoOverlay"
+    )
+    db.add(job)
+    db.commit()
+
+    # Send to Celery
+    celery_app.send_task(
+        "app.tasks.add_video_overlay_task",
+        args=[job_id, input_path, output_path, overlay_path, x, y, width, height, start_time, end_time, opacity],
+        task_id=job_id
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "Video overlay processing started",
+    }
