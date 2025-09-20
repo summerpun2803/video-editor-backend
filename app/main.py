@@ -9,9 +9,15 @@ import os
 import uuid
 import ffmpeg
 import subprocess
+from fastapi import Form
 
 from .database import Base, engine, get_db
 from . import models
+from pydantic import BaseModel
+from typing import List
+
+class QualityRequest(BaseModel):
+    qualities: List[str] = ["720p", "480p"]
 
 from .celery_app import celery_app
 from .tasks import trim_video_task
@@ -399,3 +405,95 @@ async def add_video_overlay(
         "status": "pending",
         "message": "Video overlay processing started",
     }
+
+QUALITY_PRESETS = {
+    "1080p": {"width": 1920, "height": 1080, "bitrate": "8000k"},
+    "720p": {"width": 1280, "height": 720, "bitrate": "4000k"},
+    "480p": {"width": 854, "height": 480, "bitrate": "2000k"},
+    "360p": {"width": 640, "height": 360, "bitrate": "1000k"},
+}
+
+@app.post("/quality/{video_id}")
+async def generate_quality_versions(
+    video_id: int,
+    request: QualityRequest,  # Default to these if not specified
+    db: Session = Depends(get_db)
+):
+    # Validate video
+    video = db.query(models.Video).filter(models.Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    input_path = os.path.join(UPLOAD_DIR, video.filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail="Source file not found")
+    
+    qualities = request.qualities
+    # Validate requested qualities
+    invalid_qualities = [q for q in qualities if q not in QUALITY_PRESETS]
+    if invalid_qualities:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid qualities: {invalid_qualities}. Available: {list(QUALITY_PRESETS.keys())}"
+        )
+
+    job_ids = []
+    
+    for quality in qualities:
+        # Skip if already generated
+        existing = db.query(models.VideoQuality)\
+            .filter(models.VideoQuality.video_id == video_id)\
+            .filter(models.VideoQuality.quality == quality).first()
+        
+        if existing:
+            continue
+
+        # Generate output filename
+        name, ext = os.path.splitext(video.filename)
+        output_filename = f"{name}_{quality}{ext}"
+        output_path = os.path.join(UPLOAD_DIR, output_filename)
+
+        # Create job
+        job_id = str(uuid.uuid4())
+        job = models.Job(
+            id=job_id,
+            original_video_id=video_id,
+            status="pending"
+        )
+        db.add(job)
+        db.commit()
+
+        # Send to Celery
+        celery_app.send_task(
+            "app.tasks.convert_quality_task",
+            args=[job_id, input_path, output_path, quality],
+            task_id=job_id
+        )
+
+        job_ids.append(job_id)
+
+    return {
+        "video_id": video_id,
+        "requested_qualities": qualities,
+        "job_ids": job_ids,
+        "message": f"Generating {len(job_ids)} quality versions"
+    }
+
+@app.get("/download/{filename}")
+def download_file(filename: str):
+    # Security check
+    if ".." in filename or filename.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Look for file in uploads directory
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(
+        file_path,
+        media_type="video/mp4",
+        filename=filename
+    )
+

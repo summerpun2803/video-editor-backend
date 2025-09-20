@@ -15,6 +15,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logging.getLogger().handlers[0].flush = lambda: None 
 
+QUALITY_PRESETS = {
+    "1080p": {"width": 1920, "height": 1080, "bitrate": "8000k"},
+    "720p": {"width": 1280, "height": 720, "bitrate": "4000k"},
+    "480p": {"width": 854, "height": 480, "bitrate": "2000k"},
+    "360p": {"width": 640, "height": 360, "bitrate": "1000k"},
+}   
+
 def get_db():
     db = SessionLocal()
     try:
@@ -345,5 +352,85 @@ def add_video_overlay_task(self, job_id: str, input_path: str, output_path: str,
             job.result_filename = None
             db.commit()
         raise Exception(f"Video overlay failed: {str(e)}")
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.tasks.convert_quality_task")
+def convert_quality_task(self, job_id: str, input_path: str, output_path: str, quality: str):
+    db = next(get_db())
+    
+    try:
+        # Get job
+        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        if not job:
+            raise Exception(f"Job {job_id} not found")
+
+        job.status = "processing"
+        db.commit()
+
+        # Get quality preset
+        if quality not in QUALITY_PRESETS:
+            raise Exception(f"Unknown quality: {quality}")
+        
+        preset = QUALITY_PRESETS[quality]
+
+        # FFmpeg command for quality conversion
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-vf', f'scale={preset["width"]}:{preset["height"]}',
+            '-c:v', 'libx264',
+            '-b:v', preset["bitrate"],
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-strict', 'experimental',
+            output_path
+        ]
+        
+        # Execute
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+        # Verify output
+        if not os.path.exists(output_path):
+            raise Exception("Output file not created")
+
+        probe = ffmpeg.probe(output_path)
+        format_info = probe.get('format', {})
+        new_size = int(format_info.get('size', 0))
+
+        # Save quality record
+        quality_record = models.VideoQuality(
+            video_id=job.original_video_id,
+            quality=quality,
+            file_path=os.path.basename(output_path),
+            file_size=new_size,
+            width=preset['width'],
+            height=preset['height'],
+            bitrate=preset['bitrate']
+        )
+        db.add(quality_record)
+        db.commit()
+
+        # Update job
+        job.status = "completed"
+        job.result_filename = os.path.basename(output_path)
+        job.updated_video_id = job.original_video_id
+        db.commit()
+
+        return {
+            "status": "completed",
+            "job_id": job_id,
+            "quality": quality,
+            "file_size": new_size
+        }
+
+    except Exception as e:
+        job = db.query(models.Job).filter(models.Job.id == job_id).first()
+        if job:
+            job.status = "failed"
+            job.result_filename = None
+            db.commit()
+        raise Exception(f"Quality conversion failed: {str(e)}")
     finally:
         db.close()

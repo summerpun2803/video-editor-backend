@@ -41,4 +41,18 @@ class Overlay(Base):
 
     scale_width = Column(Integer, nullable=True) 
     scale_height = Column(Integer, nullable=True)  
+
+# Add this class before Video
+class VideoQuality(Base):
+    __tablename__ = "video_qualities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    video_id = Column(Integer, ForeignKey("videos.id"))
+    quality = Column(String)  # "1080p", "720p", "480p"
+    file_path = Column(String)
+    file_size = Column(Integer)
+    width = Column(Integer)
+    height = Column(Integer)
+    bitrate = Column(String)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
